@@ -670,9 +670,17 @@ const WorkspacePage = () => {
     return 'bg-gray-50 text-gray-600 border-gray-100';
   };
 
+  const isVipReport = (report) => (
+    report?.report_type?.includes('维普') || report?.report_type?.toLowerCase().includes('vip')
+  );
+
+  const getReportLineCount = (report) => (
+    report?.extracted_segment_count || report?.segments?.length || 0
+  );
+
   const getReportMetricCards = (report) => {
     const isSpeedAI = report?.report_type?.toLowerCase().includes('speedai');
-    const isVip = report?.report_type?.includes('维普') || report?.report_type?.toLowerCase().includes('vip');
+    const isVip = isVipReport(report);
     const baseCards = [
       {
         label: '总体疑似度',
@@ -687,8 +695,16 @@ const WorkspacePage = () => {
       return [
         ...baseCards,
         {
-          label: '疑似片段',
-          value: report?.extracted_segment_count,
+          label: '待优化段落',
+          value: aigcSegmentResult?.paragraph_count,
+          format: 'number',
+          cardClass: 'bg-amber-50',
+          valueClass: 'text-amber-700',
+          labelClass: 'text-amber-700/70',
+        },
+        {
+          label: '报告文本行',
+          value: getReportLineCount(report),
           format: 'number',
           cardClass: 'bg-violet-50',
           valueClass: 'text-violet-700',
@@ -1161,7 +1177,7 @@ const WorkspacePage = () => {
                           AIGC片段优化
                         </h3>
                         <p className="text-[13px] text-gray-600 mt-1 leading-relaxed">
-                          先选择原始 DOCX，再选择对应的 PaperPass 或 SpeedAI PDF 检测报告；系统会把疑似片段填入下方文本框，只优化这些内容。
+                          先选择原始 DOCX，再选择对应的 PaperPass、SpeedAI 或维普 PDF 检测报告；系统会把疑似片段填入下方文本框，只优化这些内容。
                         </p>
                       </div>
                       <input
@@ -1237,7 +1253,7 @@ const WorkspacePage = () => {
                               </button>
                             </div>
                           ) : (
-                            <span className="text-[13px] text-ios-gray">支持上传 PaperPass / SpeedAI .pdf 检测报告</span>
+                            <span className="text-[13px] text-ios-gray">支持上传 PaperPass / SpeedAI / 维普 .pdf 检测报告</span>
                           )}
                         </div>
                         <button
@@ -1326,10 +1342,14 @@ const WorkspacePage = () => {
                         <div className="space-y-2">
                           <div className="flex items-center justify-between">
                             <div className="text-[13px] font-semibold text-black">
-                              疑似片段 {aigcReportResult.extracted_segment_count || 0} / {aigcReportResult.fragment_count || '--'}
+                              {isVipReport(aigcReportResult)
+                                ? `待优化 DOCX 段落 ${aigcSegmentResult?.paragraph_count || 0} 个`
+                                : `疑似片段 ${aigcReportResult.extracted_segment_count || 0} / ${aigcReportResult.fragment_count || '--'}`}
                             </div>
                             <div className="text-[12px] text-ios-gray">
-                              已匹配 DOCX 段落 {aigcSegmentResult?.paragraph_count || 0} 个
+                              {isVipReport(aigcReportResult)
+                                ? `已匹配报告文本行 ${aigcSegmentResult?.matched_report_segment_count || 0} / ${getReportLineCount(aigcReportResult)}`
+                                : `已匹配 DOCX 段落 ${aigcSegmentResult?.paragraph_count || 0} 个`}
                             </div>
                           </div>
 
@@ -1355,7 +1375,9 @@ const WorkspacePage = () => {
                             </div>
                           )}
                           <div className="rounded-md bg-amber-50 px-3 py-2 text-[12px] text-amber-700 leading-relaxed">
-                            已将匹配到的 DOCX 段落填入下方文本框；下载标记版 DOCX 后，浅黄色段落就是本次实际优化并写回的位置。
+                            {isVipReport(aigcReportResult)
+                              ? '上方为维普报告疑似文本行预览；已将匹配到的 DOCX 段落填入下方文本框，下载标记版 DOCX 后，浅黄色段落就是本次实际优化并写回的位置。'
+                              : '已将匹配到的 DOCX 段落填入下方文本框；下载标记版 DOCX 后，浅黄色段落就是本次实际优化并写回的位置。'}
                           </div>
                         </div>
                       </div>
