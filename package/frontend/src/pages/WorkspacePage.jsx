@@ -646,7 +646,7 @@ const WorkspacePage = () => {
     {
       id: 'aigc',
       title: 'AIGC片段优化',
-      desc: '上传原文 DOCX 和检测报告，只优化检测出的疑似片段。',
+      desc: '上传原文 DOCX 和 PaperPass、SpeedAI、维普检测报告，只优化检测出的疑似片段。',
       icon: FileSearch,
       tone: 'amber',
     },
@@ -655,6 +655,13 @@ const WorkspacePage = () => {
   const formatPercent = (value) => (
     typeof value === 'number' ? `${value.toFixed(2)}%` : '--'
   );
+
+  const formatMetricValue = (metric) => {
+    if (metric?.format === 'number') {
+      return typeof metric.value === 'number' ? metric.value.toLocaleString() : '--';
+    }
+    return formatPercent(metric?.value);
+  };
 
   const getRiskBadgeClass = (level) => {
     if (level === 'high') return 'bg-red-50 text-red-700 border-red-100';
@@ -665,6 +672,7 @@ const WorkspacePage = () => {
 
   const getReportMetricCards = (report) => {
     const isSpeedAI = report?.report_type?.toLowerCase().includes('speedai');
+    const isVip = report?.report_type?.includes('维普') || report?.report_type?.toLowerCase().includes('vip');
     const baseCards = [
       {
         label: '总体疑似度',
@@ -674,6 +682,28 @@ const WorkspacePage = () => {
         labelClass: 'text-gray-500',
       },
     ];
+
+    if (isVip) {
+      return [
+        ...baseCards,
+        {
+          label: '疑似片段',
+          value: report?.extracted_segment_count,
+          format: 'number',
+          cardClass: 'bg-violet-50',
+          valueClass: 'text-violet-700',
+          labelClass: 'text-violet-700/70',
+        },
+        {
+          label: '论文字符数',
+          value: report?.word_count,
+          format: 'number',
+          cardClass: 'bg-blue-50',
+          valueClass: 'text-blue-700',
+          labelClass: 'text-blue-700/70',
+        },
+      ];
+    }
 
     if (isSpeedAI) {
       return [
@@ -1284,7 +1314,7 @@ const WorkspacePage = () => {
                           {getReportMetricCards(aigcReportResult).map((metric) => (
                             <div key={metric.label} className={`rounded-md p-3 ${metric.cardClass}`}>
                               <div className={`text-[18px] font-semibold ${metric.valueClass}`}>
-                                {formatPercent(metric.value)}
+                                {formatMetricValue(metric)}
                               </div>
                               <div className={`text-[12px] ${metric.labelClass}`}>
                                 {metric.label}

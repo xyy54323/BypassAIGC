@@ -337,7 +337,7 @@ async def extract_aigc_report(
     card_key: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    """上传 PaperPass 或 SpeedAI AIGC 检测报告 PDF 并提取总体指标和疑似片段。"""
+    """上传 PaperPass、SpeedAI 或维普 AIGC 检测报告 PDF 并提取总体指标和疑似片段。"""
     get_current_user(card_key, db)
 
     filename = file.filename or "aigc-report.pdf"

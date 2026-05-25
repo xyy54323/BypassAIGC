@@ -20,3 +20,6 @@ sse-starlette==3.0.3
 mistune>=3.0.0
 python-docx>=1.1.0
 lxml>=4.9.0
+
+# PDF 检测报告解析依赖
+PyMuPDF>=1.24.0

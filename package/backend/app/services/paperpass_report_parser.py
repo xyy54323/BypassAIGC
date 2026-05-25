@@ -13,6 +13,11 @@ except ImportError:  # pragma: no cover - handled at runtime for packaged builds
     fitz = None
 
 
+VIP_AIGC_TEXT_COLORS = {0x5E30CC}
+VIP_AIGC_TEXT_HEX_COLORS = {"#5E30CC"}
+VIP_MIN_SEGMENT_TEXT_LENGTH = 12
+
+
 @dataclass
 class PaperPassReportSegment:
     page: int
@@ -63,8 +68,10 @@ def parse_aigc_detection_report(filename: str, content: bytes) -> PaperPassRepor
             return _parse_paperpass_report(safe_name, document, first_page_text)
         if "SpeedAI" in first_page_text and "AIGC" in first_page_text:
             return _parse_speedai_report(safe_name, document, first_page_text)
+        if _is_vip_original_comparison_report(first_page_text):
+            return _parse_vip_original_comparison_report(safe_name, document, first_page_text)
 
-        raise ValueError("当前仅支持 PaperPass 或 SpeedAI AIGC 检测报告 PDF")
+        raise ValueError("当前仅支持 PaperPass、SpeedAI 或维普 AIGC 原文对照报告 PDF")
     finally:
         document.close()
 
@@ -119,6 +126,218 @@ def _parse_speedai_report(safe_name: str, document, first_page_text: str) -> Pap
         extracted_segment_count=len(segments),
         segments=segments,
     )
+
+
+def _parse_vip_original_comparison_report(
+    safe_name: str,
+    document,
+    first_page_text: str,
+) -> PaperPassReportResult:
+    overall_suspicion = _extract_vip_overall_suspicion(first_page_text)
+    segments = _extract_vip_aigc_segments(document, overall_suspicion)
+    return PaperPassReportResult(
+        source_filename=safe_name,
+        report_type="维普 AIGC 原文对照报告",
+        report_id=_extract_vip_report_id(first_page_text),
+        title=_extract_vip_metadata_value(first_page_text, "题目"),
+        author=_extract_vip_metadata_value(first_page_text, "作者"),
+        submitted_at=_match_text(first_page_text, r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})"),
+        overall_suspicion=overall_suspicion,
+        weighted_suspicion=None,
+        high_ratio=None,
+        medium_ratio=None,
+        low_ratio=None,
+        undetected_ratio=None,
+        word_count=_match_int(first_page_text, r"论文字符数[:：]\s*(\d+)"),
+        paragraph_count=None,
+        sentence_count=None,
+        fragment_count=len(segments),
+        extracted_segment_count=len(segments),
+        segments=segments,
+    )
+
+
+def _is_vip_original_comparison_report(text: str) -> bool:
+    normalized = text or ""
+    return (
+        "原文对照报告" in normalized
+        and "AIGC" in normalized
+        and ("疑似AIGC生成" in normalized or "疑似AICG生成" in normalized)
+    )
+
+
+def _extract_vip_aigc_segments(
+    document,
+    overall_suspicion: Optional[float],
+) -> List[PaperPassReportSegment]:
+    segments: List[PaperPassReportSegment] = []
+    seen = set()
+    ai_percent = overall_suspicion if overall_suspicion is not None else 0.0
+
+    for page_index in range(document.page_count):
+        for line in _extract_vip_aigc_lines(document[page_index]):
+            text = _normalize_report_line(line["text"])
+            compact = re.sub(r"\s+", "", text)
+            if len(compact) < VIP_MIN_SEGMENT_TEXT_LENGTH:
+                continue
+            if compact in seen:
+                continue
+
+            seen.add(compact)
+            segments.append(
+                PaperPassReportSegment(
+                    page=page_index + 1,
+                    ai_percent=ai_percent,
+                    risk_level="medium",
+                    risk_label="疑似AIGC生成",
+                    text=text,
+                )
+            )
+
+    return segments
+
+
+def _extract_vip_aigc_lines(page) -> List[dict]:
+    spans = []
+    for span in page.get_texttrace():
+        if not _is_vip_aigc_span(span):
+            continue
+        text = _extract_texttrace_span_text(span).strip()
+        if not text:
+            continue
+        bbox = fitz.Rect(span.get("bbox"))
+        spans.append(
+            {
+                "bbox": bbox,
+                "text": text,
+                "center_y": (bbox.y0 + bbox.y1) / 2,
+            }
+        )
+
+    return _group_vip_spans_by_line(spans)
+
+
+def _is_vip_aigc_span(span: dict) -> bool:
+    color = span.get("color")
+    if isinstance(color, int):
+        return color in VIP_AIGC_TEXT_COLORS
+    return _color_to_hex(color) in VIP_AIGC_TEXT_HEX_COLORS
+
+
+def _extract_texttrace_span_text(span: dict) -> str:
+    return "".join(chr(char[0]) for char in span.get("chars", []))
+
+
+def _group_vip_spans_by_line(spans: List[dict]) -> List[dict]:
+    grouped: List[dict] = []
+    y_tolerance = 3.0
+
+    for span in sorted(spans, key=lambda item: (item["center_y"], item["bbox"].x0)):
+        target = None
+        for line in grouped:
+            if abs(span["center_y"] - line["center_y"]) <= y_tolerance:
+                target = line
+                break
+
+        if target is None:
+            grouped.append(
+                {
+                    "center_y": span["center_y"],
+                    "spans": [span],
+                }
+            )
+            continue
+
+        target["spans"].append(span)
+        target["center_y"] = sum(item["center_y"] for item in target["spans"]) / len(target["spans"])
+
+    lines = []
+    for line in sorted(grouped, key=lambda item: item["center_y"]):
+        ordered_spans = sorted(line["spans"], key=lambda item: item["bbox"].x0)
+        line_bbox = ordered_spans[0]["bbox"]
+        for span in ordered_spans[1:]:
+            line_bbox |= span["bbox"]
+        lines.append(
+            {
+                "bbox": line_bbox,
+                "text": _join_span_texts([item["text"] for item in ordered_spans]),
+            }
+        )
+
+    return lines
+
+
+def _join_span_texts(texts: List[str]) -> str:
+    content = ""
+    for text in texts:
+        if not text:
+            continue
+        if content and _needs_space(content[-1], text[0]):
+            content += " "
+        content += text
+    return content
+
+
+def _extract_vip_report_id(text: str) -> Optional[str]:
+    match = re.search(r"(?m)^([A-Za-z0-9]{10,})$", text or "")
+    return match.group(1) if match else None
+
+
+def _extract_vip_metadata_value(text: str, label: str) -> Optional[str]:
+    lines = [
+        _normalize_report_line(line)
+        for line in (text or "").splitlines()
+        if _normalize_report_line(line)
+    ]
+    for index, line in enumerate(lines):
+        if not line.startswith(label):
+            continue
+        for candidate in reversed(lines[:index]):
+            if _is_vip_metadata_candidate(candidate):
+                return candidate
+    return None
+
+
+def _is_vip_metadata_candidate(text: str) -> bool:
+    if not text:
+        return False
+    if re.fullmatch(r"\d+", text):
+        return False
+    if re.fullmatch(r"[\d.]+%", text):
+        return False
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}.*", text):
+        return False
+    if re.fullmatch(r"[A-Za-z0-9]{10,}", text):
+        return False
+    return text not in {
+        "NO.",
+        "原文对照报告（PDF）·",
+        "通用版",
+        "检测结果",
+        "结果分布",
+        "题目：",
+        "作者：",
+        "检测所属单位：",
+    }
+
+
+def _extract_vip_overall_suspicion(text: str) -> Optional[float]:
+    lines = [
+        _normalize_report_line(line)
+        for line in (text or "").splitlines()
+        if _normalize_report_line(line)
+    ]
+    result_start = next((index for index, line in enumerate(lines) if line == "检测结果"), 0)
+    for index, line in enumerate(lines[result_start:], start=result_start):
+        if line != "人工撰写占比":
+            continue
+        for candidate in lines[index + 1 : index + 5]:
+            match = re.fullmatch(r"([\d.]+)%", candidate)
+            if match:
+                return _to_float(match.group(1))
+
+    match = re.search(r"疑似\s*AIGC\s*生成占比[:：]?\s*([\d.]+)%", text or "", re.IGNORECASE)
+    return _to_float(match.group(1)) if match else None
 
 
 def _extract_overall_suspicion(text: str, weighted: bool) -> Optional[float]:
