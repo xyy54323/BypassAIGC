@@ -55,6 +55,16 @@ PAGE_NUMBER_RE = re.compile(r"^\d+$")
 PUNCTUATION_ONLY_RE = re.compile(r"^[。．.，,、；;：:！？!?…—\-_/／\\|]+$")
 PALE_YELLOW_FILL = "FFF2CC"
 WORD_SOURCE_STORE_DIR = Path(get_exe_dir()) / ".word_source_cache"
+SUPERSCRIPT_TRANS = str.maketrans(
+    "0123456789+-=()nNi",
+    "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿᴺⁱ",
+)
+SUPERSCRIPT_TO_NORMAL_TRANS = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁻", "0123456789-")
+SUBSCRIPT_TRANS = str.maketrans(
+    "0123456789+-=()aeijmnoprstuvx",
+    "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑᵢⱼₘₙₒₚᵣₛₜᵤᵥₓ",
+)
+REFERENCE_MARKER_WITH_SCRIPT_RE = re.compile(r"\[[0-9⁰¹²³⁴⁵⁶⁷⁸⁹,\s，、\-–—⁻]+\]")
 
 
 @dataclass
@@ -479,7 +489,7 @@ def _extract_body_paragraphs(document: DocxDocument) -> Tuple[List[ExtractedBody
     start_heading = ""
 
     for index, paragraph in enumerate(document.paragraphs):
-        text = _normalize_paragraph_text(paragraph.text)
+        text = _normalize_paragraph_text(_paragraph_text_with_script_marks(paragraph))
         style_name = paragraph.style.name if paragraph.style else ""
         if not text:
             continue
@@ -539,6 +549,53 @@ def _split_text_into_body_paragraphs(text: str) -> List[str]:
 
 def _normalize_paragraph_text(text: str) -> str:
     return re.sub(r"[ \t\u3000]+", " ", text.replace("\r", " ").replace("\n", " ")).strip()
+
+
+def _paragraph_text_with_script_marks(paragraph) -> str:
+    if not paragraph.runs:
+        return paragraph.text
+
+    parts = []
+    runs = list(paragraph.runs)
+    for index, run in enumerate(runs):
+        text = run.text or ""
+        if not text:
+            continue
+        if run.font.superscript:
+            previous_text = "".join(parts)
+            next_text = _next_non_empty_run_text(runs, index)
+            if _is_reference_marker_run(text, previous_text, next_text):
+                parts.append(text)
+            else:
+                parts.append(text.translate(SUPERSCRIPT_TRANS))
+        elif run.font.subscript:
+            parts.append(text.translate(SUBSCRIPT_TRANS))
+        else:
+            parts.append(text)
+    return _normalize_reference_markers("".join(parts))
+
+
+def _next_non_empty_run_text(runs: List[object], current_index: int) -> str:
+    for run in runs[current_index + 1 :]:
+        if run.text:
+            return run.text
+    return ""
+
+
+def _is_reference_marker_run(text: str, previous_text: str, next_text: str) -> bool:
+    stripped = text.strip()
+    if re.fullmatch(r"\[\s*\d+(?:\s*[-,，、]\s*\d+)*\s*\]", stripped):
+        return True
+    if re.fullmatch(r"\d+(?:\s*[-,，、]\s*\d+)*", stripped):
+        return previous_text.rstrip().endswith("[") and next_text.lstrip().startswith("]")
+    return False
+
+
+def _normalize_reference_markers(text: str) -> str:
+    def replace_reference_marker(match: re.Match[str]) -> str:
+        return match.group(0).translate(SUPERSCRIPT_TO_NORMAL_TRANS)
+
+    return REFERENCE_MARKER_WITH_SCRIPT_RE.sub(replace_reference_marker, text)
 
 
 def _is_start_heading(text: str) -> bool:
