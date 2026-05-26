@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import io
 import json
+import posixpath
 import re
+import zipfile
 from copy import deepcopy
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import List, Tuple
+from xml.etree import ElementTree
 from uuid import uuid4
 
 from docx import Document
@@ -49,6 +52,7 @@ CAPTION_RE = re.compile(
     re.IGNORECASE,
 )
 PAGE_NUMBER_RE = re.compile(r"^\d+$")
+PUNCTUATION_ONLY_RE = re.compile(r"^[。．.，,、；;：:！？!?…—\-_/／\\|]+$")
 PALE_YELLOW_FILL = "FFF2CC"
 WORD_SOURCE_STORE_DIR = Path(get_exe_dir()) / ".word_source_cache"
 
@@ -388,7 +392,82 @@ def _load_word_source(filename: str, content: bytes) -> Tuple[DocxDocument, byte
     if suffix != ".docx":
         raise ValueError("仅支持上传 .docx 文件")
 
-    return Document(io.BytesIO(content)), content
+    try:
+        return Document(io.BytesIO(content)), content
+    except KeyError as exc:
+        repaired_content = _repair_docx_missing_relationship_targets(content)
+        if repaired_content == content:
+            raise exc
+        return Document(io.BytesIO(repaired_content)), repaired_content
+
+
+def _repair_docx_missing_relationship_targets(content: bytes) -> bytes:
+    """Remove broken internal relationships that Word tolerates but python-docx rejects."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(content), "r") as source_zip:
+            existing_names = set(source_zip.namelist())
+            replacements = {}
+            for rels_name in existing_names:
+                if not rels_name.endswith(".rels"):
+                    continue
+                rels_blob = source_zip.read(rels_name)
+                repaired_blob = _repair_rels_blob(rels_name, rels_blob, existing_names)
+                if repaired_blob != rels_blob:
+                    replacements[rels_name] = repaired_blob
+
+            if not replacements:
+                return content
+
+            output = io.BytesIO()
+            with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as target_zip:
+                for item in source_zip.infolist():
+                    blob = replacements.get(item.filename)
+                    if blob is None:
+                        blob = source_zip.read(item.filename)
+                    target_zip.writestr(item, blob)
+            return output.getvalue()
+    except (zipfile.BadZipFile, ElementTree.ParseError):
+        return content
+
+
+def _repair_rels_blob(rels_name: str, rels_blob: bytes, existing_names: set) -> bytes:
+    namespace = {"rel": "http://schemas.openxmlformats.org/package/2006/relationships"}
+    root = ElementTree.fromstring(rels_blob)
+    changed = False
+    rels_base = _relationship_base_path(rels_name)
+
+    for relationship in list(root):
+        target = relationship.attrib.get("Target", "")
+        mode = relationship.attrib.get("TargetMode", "")
+        if not target or mode.lower() == "external":
+            continue
+        if _relationship_target_exists(rels_base, target, existing_names):
+            continue
+        root.remove(relationship)
+        changed = True
+
+    if not changed:
+        return rels_blob
+
+    ElementTree.register_namespace("", namespace["rel"])
+    return ElementTree.tostring(root, encoding="UTF-8", xml_declaration=True)
+
+
+def _relationship_base_path(rels_name: str) -> str:
+    if rels_name == "_rels/.rels":
+        return ""
+    if "/_rels/" not in rels_name:
+        return posixpath.dirname(rels_name)
+    prefix, rel_file = rels_name.rsplit("/_rels/", 1)
+    source_file = rel_file[:-5] if rel_file.endswith(".rels") else rel_file
+    return posixpath.dirname(posixpath.join(prefix, source_file))
+
+
+def _relationship_target_exists(base_path: str, target: str, existing_names: set) -> bool:
+    if re.match(r"^[a-z][a-z0-9+.-]*:", target, re.IGNORECASE):
+        return True
+    normalized = posixpath.normpath(posixpath.join(base_path, target)).lstrip("/")
+    return normalized in existing_names
 
 
 def _extract_body_paragraphs(document: DocxDocument) -> Tuple[List[ExtractedBodyParagraph], str]:
@@ -478,6 +557,8 @@ def _is_keywords_heading(text: str) -> bool:
 
 def _is_skippable_paragraph(text: str, style_name: str) -> bool:
     style_lower = (style_name or "").lower()
+    if PUNCTUATION_ONLY_RE.match(text):
+        return True
     if PAGE_NUMBER_RE.match(text):
         return True
     if _is_toc_entry(text, style_name):
