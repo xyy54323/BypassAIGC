@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import html
 import json
 import posixpath
 import re
@@ -55,16 +56,12 @@ PAGE_NUMBER_RE = re.compile(r"^\d+$")
 PUNCTUATION_ONLY_RE = re.compile(r"^[。．.，,、；;：:！？!?…—\-_/／\\|]+$")
 PALE_YELLOW_FILL = "FFF2CC"
 WORD_SOURCE_STORE_DIR = Path(get_exe_dir()) / ".word_source_cache"
-SUPERSCRIPT_TRANS = str.maketrans(
-    "0123456789+-=()nNi",
-    "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁿᴺⁱ",
+SCRIPT_TAG_RE = re.compile(r"(<(/?)(sup|sub)>)", re.IGNORECASE)
+REFERENCE_WITH_SCRIPTED_NUMBER_RE = re.compile(
+    r"\[\s*<sup>(\d+(?:\s*[-,，、]\s*\d+)*)</sup>\s*\]",
+    re.IGNORECASE,
 )
-SUPERSCRIPT_TO_NORMAL_TRANS = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁻", "0123456789-")
-SUBSCRIPT_TRANS = str.maketrans(
-    "0123456789+-=()aeijmnoprstuvx",
-    "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎ₐₑᵢⱼₘₙₒₚᵣₛₜᵤᵥₓ",
-)
-REFERENCE_MARKER_WITH_SCRIPT_RE = re.compile(r"\[[0-9⁰¹²³⁴⁵⁶⁷⁸⁹,\s，、\-–—⁻]+\]")
+SCRIPT_TAG_STRIP_RE = re.compile(r"</?(?:sup|sub)>", re.IGNORECASE)
 
 
 @dataclass
@@ -373,7 +370,8 @@ def _match_report_segments_to_word_paragraphs(
 
 
 def _normalize_for_match(text: str) -> str:
-    return re.sub(r"[\W_]+", "", (text or "").lower(), flags=re.UNICODE)
+    plain_text = SCRIPT_TAG_STRIP_RE.sub("", text or "")
+    return re.sub(r"[\W_]+", "", plain_text.lower(), flags=re.UNICODE)
 
 
 def _partial_match_score(needle: str, haystack: str) -> float:
@@ -556,46 +554,26 @@ def _paragraph_text_with_script_marks(paragraph) -> str:
         return paragraph.text
 
     parts = []
-    runs = list(paragraph.runs)
-    for index, run in enumerate(runs):
+    for run in paragraph.runs:
         text = run.text or ""
         if not text:
             continue
+        escaped_text = html.escape(text, quote=False)
         if run.font.superscript:
-            previous_text = "".join(parts)
-            next_text = _next_non_empty_run_text(runs, index)
-            if _is_reference_marker_run(text, previous_text, next_text):
-                parts.append(text)
-            else:
-                parts.append(text.translate(SUPERSCRIPT_TRANS))
+            parts.append(f"<sup>{escaped_text}</sup>")
         elif run.font.subscript:
-            parts.append(text.translate(SUBSCRIPT_TRANS))
+            parts.append(f"<sub>{escaped_text}</sub>")
         else:
-            parts.append(text)
-    return _normalize_reference_markers("".join(parts))
+            parts.append(escaped_text)
+    return _merge_reference_script_tags("".join(parts))
 
 
-def _next_non_empty_run_text(runs: List[object], current_index: int) -> str:
-    for run in runs[current_index + 1 :]:
-        if run.text:
-            return run.text
-    return ""
-
-
-def _is_reference_marker_run(text: str, previous_text: str, next_text: str) -> bool:
-    stripped = text.strip()
-    if re.fullmatch(r"\[\s*\d+(?:\s*[-,，、]\s*\d+)*\s*\]", stripped):
-        return True
-    if re.fullmatch(r"\d+(?:\s*[-,，、]\s*\d+)*", stripped):
-        return previous_text.rstrip().endswith("[") and next_text.lstrip().startswith("]")
-    return False
-
-
-def _normalize_reference_markers(text: str) -> str:
-    def replace_reference_marker(match: re.Match[str]) -> str:
-        return match.group(0).translate(SUPERSCRIPT_TO_NORMAL_TRANS)
-
-    return REFERENCE_MARKER_WITH_SCRIPT_RE.sub(replace_reference_marker, text)
+def _merge_reference_script_tags(text: str) -> str:
+    previous = None
+    while previous != text:
+        previous = text
+        text = re.sub(r"</(sup|sub)><\1>", "", text, flags=re.IGNORECASE)
+    return REFERENCE_WITH_SCRIPTED_NUMBER_RE.sub(r"<sup>[\1]</sup>", text)
 
 
 def _is_start_heading(text: str) -> bool:
@@ -734,10 +712,48 @@ def _replace_paragraph_text_preserving_style(paragraph, text: str) -> None:
     if not text:
         return
 
-    new_run = paragraph.add_run(text)
+    for run_text, script_type in _iter_text_with_script_tags(text):
+        new_run = paragraph.add_run(run_text)
+        _apply_base_run_props(new_run, first_run_props, script_type)
+
+
+def _iter_text_with_script_tags(text: str) -> List[Tuple[str, str]]:
+    result: List[Tuple[str, str]] = []
+    active_script = ""
+    cursor = 0
+    for tag_match in SCRIPT_TAG_RE.finditer(text):
+        if tag_match.start() > cursor:
+            plain_text = html.unescape(text[cursor : tag_match.start()])
+            if plain_text:
+                result.append((plain_text, active_script))
+
+        is_closing = bool(tag_match.group(2))
+        tag_name = tag_match.group(3).lower()
+        active_script = "" if is_closing else tag_name
+        cursor = tag_match.end()
+
+    if cursor < len(text):
+        plain_text = html.unescape(text[cursor:])
+        if plain_text:
+            result.append((plain_text, active_script))
+    return result
+
+
+def _apply_base_run_props(run, first_run_props, script_type: str) -> None:
     if first_run_props is not None:
-        run_props = new_run._r.get_or_add_rPr()
+        run_props = run._r.get_or_add_rPr()
         for child in list(run_props):
             run_props.remove(child)
         for child in first_run_props:
             run_props.append(deepcopy(child))
+    else:
+        run_props = run._r.get_or_add_rPr()
+
+    for child in list(run_props):
+        if child.tag == qn("w:vertAlign"):
+            run_props.remove(child)
+
+    if script_type in {"sup", "sub"}:
+        vert_align = OxmlElement("w:vertAlign")
+        vert_align.set(qn("w:val"), "superscript" if script_type == "sup" else "subscript")
+        run_props.append(vert_align)
