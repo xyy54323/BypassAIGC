@@ -5,13 +5,19 @@ from app.config import settings
 
 # 等待并发权限的最大超时时间（秒）
 ACQUIRE_TIMEOUT = 3600  # 1小时
+MAX_CONCURRENT_TASKS_LIMIT = 5
+
+
+def clamp_concurrent_limit(value: int) -> int:
+    return min(max(int(value), 1), MAX_CONCURRENT_TASKS_LIMIT)
 
 
 class ConcurrencyManager:
     """并发控制管理器"""
     
     def __init__(self, max_concurrent: int = None):
-        self.max_concurrent = max_concurrent or settings.MAX_CONCURRENT_USERS
+        initial_limit = settings.MAX_CONCURRENT_USERS if max_concurrent is None else max_concurrent
+        self.max_concurrent = clamp_concurrent_limit(initial_limit)
         self.active_sessions: Dict[str, datetime] = {}
         self.queue: List[str] = []
         self._lock = asyncio.Lock()
@@ -100,7 +106,7 @@ class ConcurrencyManager:
     async def update_limit(self, new_limit: int):
         """更新并发限制"""
         async with self._condition:
-            self.max_concurrent = max(1, new_limit)
+            self.max_concurrent = clamp_concurrent_limit(new_limit)
             self._activate_waiting_locked()
             self._condition.notify_all()  # 唤醒所有等待者以检查新的限制
 

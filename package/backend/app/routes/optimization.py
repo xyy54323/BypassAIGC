@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, defer
 from sse_starlette.sse import EventSourceResponse
 
 from app.config import settings
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.models.models import ChangeLog, OptimizationSegment, OptimizationSession, User
 from app.schemas import (
     AigcMatchedDocxExtractResponse,
@@ -55,17 +55,21 @@ TXT_MEDIA_TYPE = "text/plain; charset=utf-8"
 DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
-async def run_optimization(session_id: int, db: Session):
+async def run_optimization(session_id: int):
     """后台运行优化任务"""
-    session_obj = db.query(OptimizationSession).filter(
-        OptimizationSession.id == session_id
-    ).first()
+    db = SessionLocal()
+    try:
+        session_obj = db.query(OptimizationSession).filter(
+            OptimizationSession.id == session_id
+        ).first()
 
-    if not session_obj:
-        return
+        if not session_obj:
+            return
 
-    service = OptimizationService(db, session_obj)
-    await service.start_optimization()
+        service = OptimizationService(db, session_obj)
+        await service.start_optimization()
+    finally:
+        db.close()
 
 
 def _build_download_response(content: bytes, media_type: str, filename: str, ascii_fallback: str) -> StreamingResponse:
@@ -210,7 +214,7 @@ async def start_optimization(
     db.commit()
     db.refresh(session)
 
-    background_tasks.add_task(run_optimization, session.id, db)
+    background_tasks.add_task(run_optimization, session.id)
 
     return session
 
@@ -769,7 +773,7 @@ async def retry_session(
     session.error_message = f"[重试中] 上次失败原因: {old_error}"
     db.commit()
 
-    background_tasks.add_task(run_optimization, session.id, db)
+    background_tasks.add_task(run_optimization, session.id)
 
     return {"message": "已重新排队处理未完成段落"}
 

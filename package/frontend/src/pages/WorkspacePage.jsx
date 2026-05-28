@@ -10,6 +10,7 @@ import { optimizationAPI } from '../api';
 import ConfigManager from '../components/ConfigManager';
 
 const LOCAL_ADMIN_TOKEN = 'local-admin';
+const RUNNING_SESSION_STATUSES = new Set(['processing', 'queued']);
 
 // 会话列表项组件 - 使用 memo 避免不必要重渲染
 const SessionItem = memo(({ session, activeSession, onView, onDelete, onRetry }) => {
@@ -191,13 +192,13 @@ const WorkspacePage = () => {
       const response = await optimizationAPI.listSessions();
       setSessions(response.data);
 
-      // 查找正在处理的会话
-      const processing = response.data.find(
-        s => s.status === 'processing' || s.status === 'queued'
-      );
-      if (processing) {
-        setActiveSession(processing.session_id);
-      }
+      const running = response.data.find(s => RUNNING_SESSION_STATUSES.has(s.status));
+      setActiveSession(prev => {
+        const currentStillRunning = response.data.some(
+          s => s.session_id === prev && RUNNING_SESSION_STATUSES.has(s.status)
+        );
+        return currentStillRunning ? prev : running?.session_id || null;
+      });
     } catch (error) {
       console.error('加载会话失败:', error);
     } finally {
@@ -205,10 +206,9 @@ const WorkspacePage = () => {
     }
   }, []);
 
-  // loadQueueStatus 不依赖 activeSession，避免 useEffect 重复触发
-  const loadQueueStatus = useCallback(async () => {
+  const loadQueueStatus = useCallback(async (sessionId = null) => {
     try {
-      const response = await optimizationAPI.getQueueStatus();
+      const response = await optimizationAPI.getQueueStatus(sessionId);
       setQueueStatus(response.data);
     } catch (error) {
       console.error('加载队列状态失败:', error);
@@ -231,14 +231,13 @@ const WorkspacePage = () => {
         );
       });
 
-      // 如果会话完成,刷新列表
-      if (progress.status === 'completed' || progress.status === 'failed') {
-        setActiveSession(null);
+      // 如果会话结束,刷新列表
+      if (progress.status === 'completed' || progress.status === 'failed' || progress.status === 'stopped') {
         loadSessions();
 
         if (progress.status === 'completed') {
           toast.success('优化完成!');
-        } else {
+        } else if (progress.status === 'failed') {
           toast.error(`优化失败: ${progress.error_message}`);
         }
       }
@@ -246,6 +245,12 @@ const WorkspacePage = () => {
       console.error('更新进度失败:', error);
     }
   }, [loadSessions]);
+
+  const activeSessionIds = useMemo(() => {
+    return sessions
+      .filter(session => RUNNING_SESSION_STATUSES.has(session.status))
+      .map(session => session.session_id);
+  }, [sessions]);
 
   // 初始加载 - 只在组件挂载时执行一次
   useEffect(() => {
@@ -255,19 +260,24 @@ const WorkspacePage = () => {
 
   // 队列状态轮询 - 独立的 useEffect，避免与初始加载混淆
   useEffect(() => {
-    const interval = setInterval(loadQueueStatus, 15000);
+    loadQueueStatus(activeSession);
+    const interval = setInterval(() => loadQueueStatus(activeSession), 15000);
     return () => clearInterval(interval);
-  }, [loadQueueStatus]);
+  }, [activeSession, loadQueueStatus]);
 
   useEffect(() => {
-    // 如果有活跃会话,每4秒更新进度（进一步降低频率）
-    if (activeSession) {
-      const interval = setInterval(() => {
-        updateSessionProgress(activeSession);
-      }, 4000);
-      return () => clearInterval(interval);
+    if (activeSessionIds.length === 0) {
+      return undefined;
     }
-  }, [activeSession, updateSessionProgress]);
+
+    const interval = setInterval(() => {
+      activeSessionIds.forEach(sessionId => {
+        updateSessionProgress(sessionId);
+      });
+    }, 4000);
+
+    return () => clearInterval(interval);
+  }, [activeSessionIds, updateSessionProgress]);
 
   const resetWordFileInput = useCallback(() => {
     setSelectedWordFile(null);
@@ -534,6 +544,7 @@ const WorkspacePage = () => {
       });
 
       setActiveSession(response.data.session_id);
+      loadQueueStatus(response.data.session_id);
       toast.success('优化任务已启动');
       setText('');
       loadSessions();
@@ -542,7 +553,7 @@ const WorkspacePage = () => {
     } finally {
       setIsSubmitting(false);
     }
-  }, [text, processingMode, isSubmitting, loadSessions, optimizationSource]);
+  }, [text, processingMode, isSubmitting, loadSessions, loadQueueStatus, optimizationSource]);
 
   const handleSwitchView = useCallback((view) => {
     setActiveView(view);
@@ -611,10 +622,9 @@ const WorkspacePage = () => {
     }
   }, [loadSessions]);
 
-  // 使用 useMemo 缓存当前活跃会话的数据
-  const currentActiveSessionData = useMemo(() => {
-    return sessions.find(s => s.session_id === activeSession);
-  }, [sessions, activeSession]);
+  const runningSessions = useMemo(() => {
+    return sessions.filter(session => RUNNING_SESSION_STATUSES.has(session.status));
+  }, [sessions]);
 
   const sessionStats = useMemo(() => {
     return sessions.reduce(
@@ -815,34 +825,15 @@ const WorkspacePage = () => {
   );
 
   const renderActiveSessionCard = () => (
-    <div
-      role={currentActiveSessionData ? 'button' : undefined}
-      tabIndex={currentActiveSessionData ? 0 : undefined}
-      onClick={() => currentActiveSessionData && handleViewSession(currentActiveSessionData.session_id)}
-      onKeyDown={(event) => {
-        if (!currentActiveSessionData) {
-          return;
-        }
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          handleViewSession(currentActiveSessionData.session_id);
-        }
-      }}
-      title={currentActiveSessionData ? '查看当前任务详情' : undefined}
-      className={`rounded-lg border border-gray-200 bg-white p-5 shadow-sm transition-all ${
-        currentActiveSessionData
-          ? 'cursor-pointer hover:border-ios-blue/40 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-ios-blue/20'
-          : ''
-      }`}
-    >
+    <div className="rounded-lg border border-gray-200 bg-white p-5 shadow-sm">
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-[16px] font-semibold text-black flex items-center gap-2">
-          <div className={`w-2 h-2 rounded-full ${currentActiveSessionData ? 'bg-ios-blue animate-pulse' : 'bg-gray-300'}`} />
-          当前任务
+          <div className={`w-2 h-2 rounded-full ${runningSessions.length ? 'bg-ios-blue animate-pulse' : 'bg-gray-300'}`} />
+          进行中的任务
         </h2>
-        {currentActiveSessionData ? (
+        {runningSessions.length ? (
           <span className="text-[12px] font-medium px-2 py-1 bg-blue-50 text-ios-blue rounded-md">
-            查看详情
+            {runningSessions.length} 个
           </span>
         ) : (
           <span className="text-[12px] font-medium px-2 py-1 bg-gray-100 text-gray-500 rounded-md">
@@ -851,44 +842,74 @@ const WorkspacePage = () => {
         )}
       </div>
 
-      {currentActiveSessionData ? (
-        <div className="space-y-4">
-          <div>
-            <div className="flex justify-between text-[13px] mb-2 font-medium">
-              <span className="text-ios-gray">
-                当前阶段：<span className="text-black">{getStageName(currentActiveSessionData.current_stage)}</span>
-              </span>
-              <span className="text-ios-blue">
-                {Number(currentActiveSessionData.progress || 0).toFixed(1)}%
-              </span>
-            </div>
-            <div className="w-full bg-gray-100 rounded-full h-2">
-              <div
-                className="bg-ios-blue h-2 rounded-full transition-all duration-500 ease-out"
-                style={{ width: `${currentActiveSessionData.progress || 0}%` }}
-              />
-            </div>
-          </div>
+      {runningSessions.length ? (
+        <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
+          {runningSessions.map((session) => {
+            const progressValue = Number(session.progress || 0);
+            const isQueued = session.status === 'queued';
+            const isSelected = session.session_id === activeSession;
 
-          <div className="flex justify-between items-center text-[13px]">
-            <span className="text-ios-gray">
-              进度：
-              <span className="font-medium text-black">
-                {(currentActiveSessionData.current_position || 0) + 1}
-              </span>
-              {' / '}
-              {currentActiveSessionData.total_segments || 0} 段
-            </span>
+            return (
+              <button
+                key={session.id || session.session_id}
+                type="button"
+                onClick={() => handleViewSession(session.session_id)}
+                className={`w-full text-left rounded-md border px-3 py-3 transition-all hover:border-ios-blue/40 hover:bg-blue-50/30 focus:outline-none focus:ring-2 focus:ring-ios-blue/20 ${
+                  isSelected ? 'border-ios-blue/30 bg-blue-50/40' : 'border-gray-100 bg-white'
+                }`}
+                title="查看任务详情"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className={`w-2 h-2 rounded-full ${isQueued ? 'bg-orange-400' : 'bg-ios-blue animate-pulse'}`} />
+                      <span className="text-[13px] font-semibold text-black">
+                        {isQueued ? '排队中' : '处理中'}
+                      </span>
+                      <span className="text-[12px] text-ios-gray">
+                        {getStageName(session.current_stage)}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-[12px] text-ios-gray line-clamp-1">
+                      {session.preview_text || '暂无预览'}
+                    </p>
+                  </div>
+                  <span className={`shrink-0 text-[12px] font-semibold ${isQueued ? 'text-orange-600' : 'text-ios-blue'}`}>
+                    {progressValue.toFixed(1)}%
+                  </span>
+                </div>
 
-            {currentActiveSessionData.status === 'queued' && queueStatus?.your_position && (
-              <div className="flex items-center gap-1.5 text-ios-orange">
-                <Clock className="w-3.5 h-3.5" />
-                <span>
-                  排队第 {queueStatus.your_position} 位
-                  (~{Math.ceil(queueStatus.estimated_wait_time / 60)}分)
-                </span>
-              </div>
-            )}
+                <div className="mt-3 w-full bg-gray-100 rounded-full h-1.5">
+                  <div
+                    className={`${isQueued ? 'bg-orange-400' : 'bg-ios-blue'} h-1.5 rounded-full transition-all duration-500 ease-out`}
+                    style={{ width: `${progressValue}%` }}
+                  />
+                </div>
+
+                <div className="mt-2 flex items-center justify-between text-[12px] text-ios-gray">
+                  <span>
+                    进度：
+                    <span className="font-medium text-black">
+                      {(session.current_position || 0) + 1}
+                    </span>
+                    {' / '}
+                    {session.total_segments || 0} 段
+                  </span>
+
+                  {isQueued && isSelected && queueStatus?.your_position && (
+                    <span className="flex items-center gap-1 text-ios-orange">
+                      <Clock className="w-3.5 h-3.5" />
+                      第 {queueStatus.your_position} 位
+                    </span>
+                  )}
+                </div>
+              </button>
+            );
+          })}
+
+          <div className="pt-1 text-[12px] text-gray-500 flex items-center justify-between">
+            <span>同时运行上限：{queueStatus?.max_users ?? '-'}</span>
+            <span>当前运行：{queueStatus?.current_users ?? runningSessions.filter(s => s.status === 'processing').length}</span>
           </div>
         </div>
       ) : (
@@ -1400,7 +1421,7 @@ const WorkspacePage = () => {
                   <div className="mt-5 flex justify-end">
                     <button
                       onClick={handleStartOptimization}
-                      disabled={!text.trim() || activeSession || isSubmitting}
+                      disabled={!text.trim() || isSubmitting}
                       className="flex items-center gap-2 bg-ios-blue hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed text-white font-semibold py-3 px-8 rounded-lg transition-all active:scale-[0.98] shadow-sm text-[16px]"
                     >
                       {isSubmitting ? (

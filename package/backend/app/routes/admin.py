@@ -20,7 +20,7 @@ from app.schemas import (
     UserResponse,
     UserUsageUpdate,
 )
-from app.services.concurrency import concurrency_manager
+from app.services.concurrency import clamp_concurrent_limit, concurrency_manager
 from app.utils.auth import (
     create_access_token,
     generate_access_link,
@@ -708,6 +708,7 @@ async def get_config(_: str = Depends(get_admin_from_token)) -> Dict[str, Any]:
             "effort": settings.THINKING_MODE_EFFORT,
         },
         "system": {
+            "max_concurrent_users": clamp_concurrent_limit(settings.MAX_CONCURRENT_USERS),
             "max_parallel_segments_per_session": settings.MAX_PARALLEL_SEGMENTS_PER_SESSION,
             "history_compression_threshold": settings.HISTORY_COMPRESSION_THRESHOLD,
             "default_usage_limit": settings.DEFAULT_USAGE_LIMIT,
@@ -726,6 +727,15 @@ async def update_config(
 ) -> Dict[str, Any]:
     if not updates:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="缺少更新内容")
+
+    if "MAX_CONCURRENT_USERS" in updates:
+        try:
+            updates["MAX_CONCURRENT_USERS"] = str(clamp_concurrent_limit(int(updates["MAX_CONCURRENT_USERS"])))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="同时优化任务数必须是 1 到 5 之间的整数",
+            ) from exc
 
     # 使用 config.py 中的函数获取 .env 路径，支持 exe 环境
     from app.config import get_env_file_path

@@ -15,6 +15,7 @@ const ConfigManager = ({ adminToken }) => {
     ENHANCE_MODEL: '',
     ENHANCE_API_KEY: '',
     ENHANCE_BASE_URL: '',
+    MAX_CONCURRENT_USERS: '',
     MAX_PARALLEL_SEGMENTS_PER_SESSION: '',
     HISTORY_COMPRESSION_THRESHOLD: '',
     COMPRESSION_MODEL: '',
@@ -47,6 +48,7 @@ const ConfigManager = ({ adminToken }) => {
         ENHANCE_MODEL: response.data.enhance.model || '',
         ENHANCE_API_KEY: response.data.enhance.api_key || '',
         ENHANCE_BASE_URL: response.data.enhance.base_url || '',
+        MAX_CONCURRENT_USERS: response.data.system.max_concurrent_users?.toString() || '5',
         MAX_PARALLEL_SEGMENTS_PER_SESSION: response.data.system.max_parallel_segments_per_session?.toString() || '1',
         HISTORY_COMPRESSION_THRESHOLD: response.data.system.history_compression_threshold?.toString() || '',
         COMPRESSION_MODEL: response.data.compression?.model || '',
@@ -310,6 +312,22 @@ const ConfigManager = ({ adminToken }) => {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div>
+            <label className="block text-sm font-medium text-gray-500 mb-2">
+              同时优化任务数
+            </label>
+            <input
+              type="number"
+              min="1"
+              max="5"
+              value={formData.MAX_CONCURRENT_USERS}
+              onChange={(e) => setFormData({...formData, MAX_CONCURRENT_USERS: e.target.value})}
+              placeholder="5"
+              className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-sm"
+            />
+            <p className="mt-1.5 text-xs text-gray-400">同一时间最多运行多少个优化任务，最大 5 个，超出的任务会自动排队</p>
+          </div>
+
           <div>
             <label className="block text-sm font-medium text-gray-500 mb-2">
               单会话最大并行分片数
